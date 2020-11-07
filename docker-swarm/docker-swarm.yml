@@ -1,0 +1,74 @@
+---
+- hosts: all
+  become: true
+  tasks:
+    - name: install docker installation dependencies
+      apt:
+        pkg:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg-agent
+          - software-properties-common
+        update_cache: true
+    - name: add docker apt repository key
+      apt_key:
+        url: https://download.docker.com/linux/debian/gpg
+        state: present
+    - name: add docker apt repository
+      apt_repository:
+        repo: deb [arch=amd64] https://download.docker.com/linux/debian {{ ansible_lsb.codename }} stable
+        state: present
+    - name: install docker
+      apt:
+        pkg:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+        update_cache: true
+    - name: add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+    - name: ensure docker group is reflected in user session
+      meta: reset_connection
+    - name: check docker installation
+      command: docker info
+      register: docker_info
+      become: false
+    - debug:
+        var: docker_info.stdout_lines
+
+- hosts: managers[0]
+  tasks:
+    - name: check if swarm is initialised
+      command: docker info --format {% raw %}'{{.Swarm.ControlAvailable}}'{% endraw %}
+      register: is_swarm_initialised
+    - name: initialise swarm
+      command: docker swarm init --advertise-addr eth1
+      when: not (is_swarm_initialised.stdout | bool)
+
+- hosts: workers
+  vars:
+    init_manager: "{{ groups['managers'][0] }}"
+  tasks:
+    - name: check worker swarm membership
+      command: docker info --format {% raw %}'{{.Swarm.LocalNodeState}}'{% endraw %}
+      register: membership_status
+    - name: obtain swarm worker join-token
+      command: docker swarm join-token --quiet worker
+      register: worker_token
+      delegate_to: "{{ init_manager }}"
+      run_once: true
+    - name: join swarm
+      command: docker swarm join --advertise-addr eth1 --token {{ worker_token.stdout | quote }} {{ hostvars[init_manager].ansible_eth1.ipv4.address }}:2377
+      when: membership_status.stdout != 'active'
+
+- hosts: managers[0]
+  tasks:
+    - name: check swarm node status
+      command: docker node ls
+      register: swarm_status
+    - debug:
+        var: swarm_status.stdout_lines
